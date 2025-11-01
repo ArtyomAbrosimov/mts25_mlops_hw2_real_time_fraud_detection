@@ -52,12 +52,12 @@ services:
 
       echo 'Создание топиков...'
       kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic transactions --partitions 3 --replication-factor 1 --config retention.ms=604800000
-      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic scoring --partitions 3 --replication-factor 1 --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic scores --partitions 3 --replication-factor 1 --config retention.ms=604800000
 
       echo 'Топики успешно созданы:'
       kafka-topics --bootstrap-server kafka:9092 --list
       "
-  
+
   # Сервис для удобного просмотра топиков и настройки kafka
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -72,6 +72,26 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
 
+  # PostgreSQL база данных
+  postgres:
+    image: postgres:13
+    networks:
+      - ml-scorer
+    environment:
+      POSTGRES_DB: fraud_detection
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ML сервис для обнаружения фрода
   fraud_detector:
     build: ./fraud_detector
     networks:
@@ -79,20 +99,49 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_TRANSACTIONS_TOPIC: "transactions"
-      KAFKA_SCORING_TOPIC: "scoring"
+      KAFKA_SCORES_TOPIC: "scores"
     depends_on:
       - kafka
       - kafka-setup
+      - postgres
+    volumes:
+      - ./fraud_detector/logs:/app/logs
 
+  # Сервис для сохранения результатов в БД
+  result_saver:
+    build: ./result_saver
+    networks:
+      - ml-scorer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_SCORES_TOPIC: "scores"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "fraud_detection"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "password"
+    depends_on:
+      - kafka
+      - postgres
+    volumes:
+      - ./result_saver/logs:/app/logs
+
+  # Web интерфейс
   interface:
     build: ./interface
     networks:
       - ml-scorer
     environment:
-      KAFKA_BROKERS: "kafka:9092"  # Используем внутренний адрес Kafka
+      KAFKA_BROKERS: "kafka:9092"
       KAFKA_TOPIC: "transactions"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "fraud_detection"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "password"
     depends_on:
       - kafka
+      - postgres
     ports:
       - "8501:8501"
 
@@ -100,3 +149,6 @@ networks:
   ml-scorer:
     name: ml-scorer
     driver: bridge
+
+volumes:
+  postgres_data:
